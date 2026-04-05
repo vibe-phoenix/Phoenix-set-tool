@@ -1,5 +1,15 @@
-# assignShortcutCustom.py
-# Place in: C:\Users\<user>\OneDrive\Documents\maya\phoenixtools\PhoenixPanel-updater\
+import maya.cmds as cmds
+
+# Ensure we're on a writable hotkey set
+current_set = cmds.hotkeySet(query=True, current=True)
+if current_set == 'Maya_Default':
+    # Create a custom set if it doesn't exist
+    all_sets = cmds.hotkeySet(query=True, hotkeySetArray=True) or []
+    if 'PhoenixHotkeys' not in all_sets:
+        cmds.hotkeySet('PhoenixHotkeys', source='Maya_Default')
+    cmds.hotkeySet('PhoenixHotkeys', edit=True, current=True)
+    print('[Phoenix] Switched to PhoenixHotkeys set.')
+
 
 import maya.cmds as cmds
 import maya.mel  as mel
