@@ -3,43 +3,41 @@ import os, re
 
 marker = "# << ctrl_a_ae_cb_hotkey >>"
 
-inner_cmd = (
-    "import time, maya.cmds as cmds, maya.mel as mel, __main__\n"
-    "if not hasattr(__main__, '_last_a_press'): __main__._last_a_press = [0.0]\n"
-    "now = time.time(); delta = now - __main__._last_a_press[0]\n"
-    "ae='AttributeEditor'; cb='ChannelBoxLayerEditor'; uv='UVToolkitDockControl'; phx='PhoenixUVToolboxWorkspaceControl'\n"
-    "ae_e=cmds.workspaceControl(ae,exists=True); cb_e=cmds.workspaceControl(cb,exists=True); uv_e=cmds.workspaceControl(uv,exists=True); phx_e=cmds.workspaceControl(phx,exists=True)\n"
-    "try:\n"
-    "    current_ws = cmds.workspaceLayoutManager(q=True, current=True)\n"
-    "except:\n"
-    "    current_ws = ''\n"
-    "is_uv_ws = (current_ws == 'Phoenix-UV')\n"
-    "uv_mel_4 = \"if(`workspaceControl -q -r UVToolkitDockControl`){workspaceControl -e -collapse false -r AttributeEditor;}else if(`workspaceControl -q -r AttributeEditor`){workspaceControl -e -collapse false -r ChannelBoxLayerEditor;}else if(`workspaceControl -q -r ChannelBoxLayerEditor`){workspaceControl -e -collapse false -r PhoenixUVToolboxWorkspaceControl;}else if(`workspaceControl -q -r PhoenixUVToolboxWorkspaceControl`){workspaceControl -e -collapse false -r UVToolkitDockControl;}else{workspaceControl -e -collapse false -r PhoenixUVToolboxWorkspaceControl;}\"\n"
-    "uv_mel_3 = \"if(`workspaceControl -q -r UVToolkitDockControl`){workspaceControl -e -collapse false -r AttributeEditor;}else if(`workspaceControl -q -r AttributeEditor`){workspaceControl -e -collapse false -r ChannelBoxLayerEditor;}else if(`workspaceControl -q -r ChannelBoxLayerEditor`){workspaceControl -e -collapse false -r UVToolkitDockControl;}else{workspaceControl -e -collapse false -r UVToolkitDockControl;}\"\n"
-    "ae_mel = \"if(`isAttributeEditorRaised`){if(!`isChannelBoxVisible`){setChannelBoxVisible(1);}else{raiseChannelBox;}}else{openAEWindow;}\"\n"
-    "if 0 < delta < 0.25:\n"
-    "    if is_uv_ws:\n"
-    "        ae_r  = cmds.workspaceControl(ae,  q=True, r=True) if ae_e  else False\n"
-    "        cb_r  = cmds.workspaceControl(cb,  q=True, r=True) if cb_e  else False\n"
-    "        uv_r  = cmds.workspaceControl(uv,  q=True, r=True) if uv_e  else False\n"
-    "        phx_r = cmds.workspaceControl(phx, q=True, r=True) if phx_e else False\n"
-    "        if   ae_r:  cmds.workspaceControl(ae,  e=True, collapse=True)\n"
-    "        elif cb_r:  cmds.workspaceControl(cb,  e=True, collapse=True)\n"
-    "        elif uv_r:  cmds.workspaceControl(uv,  e=True, collapse=True)\n"
-    "        elif phx_r: cmds.workspaceControl(phx, e=True, collapse=True)\n"
-    "    else:\n"
-    "        ae_r = cmds.workspaceControl(ae, q=True, r=True) if ae_e else False\n"
-    "        cb_r = cmds.workspaceControl(cb, q=True, r=True) if cb_e else False\n"
-    "        if   ae_r: cmds.workspaceControl(ae, e=True, collapse=True)\n"
-    "        elif cb_r: cmds.workspaceControl(cb, e=True, collapse=True)\n"
-    "    __main__._last_a_press[0] = 0.0\n"
-    "else:\n"
-    "    __main__._last_a_press[0] = now\n"
-    "    if is_uv_ws:\n"
-    "        mel.eval(uv_mel_4 if phx_e else uv_mel_3)\n"
-    "    else:\n"
-    "        mel.eval(ae_mel)\n"
-)
+inner_cmd = """
+import time, maya.cmds as cmds, maya.mel as mel, __main__
+if not hasattr(__main__, '_last_a_press'): __main__._last_a_press = [0.0]
+now = time.time(); delta = now - __main__._last_a_press[0]
+ae='AttributeEditor'; cb='ChannelBoxLayerEditor'; uv='UVToolkitDockControl'; phx='PhoenixUVToolboxWorkspaceControl'
+ae_e=cmds.workspaceControl(ae,exists=True); cb_e=cmds.workspaceControl(cb,exists=True); uv_e=cmds.workspaceControl(uv,exists=True); phx_e=cmds.workspaceControl(phx,exists=True)
+try:    current_ws = cmds.workspaceLayoutManager(q=True, current=True)
+except: current_ws = ''
+is_uv_ws = (current_ws == 'Phoenix-UV')
+uv_mel_4 = "if(`workspaceControl -q -r UVToolkitDockControl`){workspaceControl -e -collapse false -r AttributeEditor;}else if(`workspaceControl -q -r AttributeEditor`){workspaceControl -e -collapse false -r ChannelBoxLayerEditor;}else if(`workspaceControl -q -r ChannelBoxLayerEditor`){workspaceControl -e -collapse false -r PhoenixUVToolboxWorkspaceControl;}else if(`workspaceControl -q -r PhoenixUVToolboxWorkspaceControl`){workspaceControl -e -collapse false -r UVToolkitDockControl;}else{workspaceControl -e -collapse false -r PhoenixUVToolboxWorkspaceControl;}"
+uv_mel_3 = "if(`workspaceControl -q -r UVToolkitDockControl`){workspaceControl -e -collapse false -r AttributeEditor;}else if(`workspaceControl -q -r AttributeEditor`){workspaceControl -e -collapse false -r ChannelBoxLayerEditor;}else if(`workspaceControl -q -r ChannelBoxLayerEditor`){workspaceControl -e -collapse false -r UVToolkitDockControl;}else{workspaceControl -e -collapse false -r UVToolkitDockControl;}"
+ae_mel  = "if(`isAttributeEditorRaised`){if(!`isChannelBoxVisible`){setChannelBoxVisible(1);}else{raiseChannelBox;}}else{openAEWindow;}"
+if 0 < delta < 0.25:
+    if is_uv_ws:
+        ae_r  = cmds.workspaceControl(ae,  q=True, r=True) if ae_e  else False
+        cb_r  = cmds.workspaceControl(cb,  q=True, r=True) if cb_e  else False
+        uv_r  = cmds.workspaceControl(uv,  q=True, r=True) if uv_e  else False
+        phx_r = cmds.workspaceControl(phx, q=True, r=True) if phx_e else False
+        if   ae_r:  cmds.workspaceControl(ae,  e=True, collapse=True)
+        elif cb_r:  cmds.workspaceControl(cb,  e=True, collapse=True)
+        elif uv_r:  cmds.workspaceControl(uv,  e=True, collapse=True)
+        elif phx_r: cmds.workspaceControl(phx, e=True, collapse=True)
+    else:
+        ae_r = cmds.workspaceControl(ae, q=True, r=True) if ae_e else False
+        cb_r = cmds.workspaceControl(cb, q=True, r=True) if cb_e else False
+        if   ae_r: cmds.workspaceControl(ae, e=True, collapse=True)
+        elif cb_r: cmds.workspaceControl(cb, e=True, collapse=True)
+    __main__._last_a_press[0] = 0.0
+else:
+    __main__._last_a_press[0] = now
+    if is_uv_ws:
+        mel.eval(uv_mel_4 if phx_e else uv_mel_3)
+    else:
+        mel.eval(ae_mel)
+"""
 
 new_block = f"""
 {marker}
