@@ -142,6 +142,88 @@ class PhoenixPanelSettings(QtWidgets.QDialog):
         layout.addLayout(grid)
 
         # -------------------------------------------------
+        # WORKSPACE TOGGLE PAIR
+        # -------------------------------------------------
+        ws_label = QtWidgets.QLabel("Right-Click ⚙ Workspace Toggle")
+        ws_label.setStyleSheet("color: #f5f7ff; font-weight: bold; margin-top: 4px;")
+        layout.addWidget(ws_label)
+
+        ws_hint = QtWidgets.QLabel(
+            "Right-clicking ⚙ cycles between these two workspaces."
+        )
+        ws_hint.setStyleSheet("color: #8899bb; font-size: 10px; font-style: italic;")
+        layout.addWidget(ws_hint)
+
+        ws_row = QtWidgets.QHBoxLayout()
+        ws_row.setSpacing(8)
+        # Fetch available workspaces.
+        # <userPrefDir>/workspaces/ contains one .json per workspace (built-in + custom).
+        # Filenames use underscores for spaces (e.g. UV_Editing.json -> "UV Editing").
+        # We convert underscores back to spaces and deduplicate against the hardcoded
+        # built-in list so "UV Editing" and "UV_Editing" don't both appear.
+        try:
+            import os as _os
+            import maya.cmds as _cmds
+
+            _BUILTIN = [
+                "General", "UV Editing", "Rigging", "Sculpting",
+                "Rendering", "XGen", "Motion Graphics",
+            ]
+            # Normalise to lowercase-no-space for dedup comparison
+            _builtin_keys = {w.replace(" ", "").lower(): w for w in _BUILTIN}
+
+            _ws_dir = _os.path.join(
+                (_cmds.internalVar(userPrefDir=True) or "").rstrip("/\\"),
+                "workspaces"
+            )
+
+            _found = set()
+            if _os.path.isdir(_ws_dir):
+                for _fname in _os.listdir(_ws_dir):
+                    if _fname.endswith(".json"):
+                        # Convert underscores to spaces to get display name
+                        _name = _fname[:-5].replace("_", " ")
+                        _key  = _name.replace(" ", "").lower()
+                        # Use the canonical built-in spelling if it matches one
+                        _found.add(_builtin_keys.get(_key, _name))
+
+            # Always include built-ins even if the prefs folder is missing
+            _available_workspaces = sorted(set(_BUILTIN) | _found)
+
+        except Exception:
+            _available_workspaces = ["General", "UV Editing", "Rigging", "Sculpting",
+                                     "Rendering", "XGen", "Motion Graphics"]
+
+        _current_cycle = getattr(panel, "workspace_cycle", ["General", "UV Editing"])
+
+        ws_a_label = QtWidgets.QLabel("Workspace A:")
+        ws_a_label.setStyleSheet("color: #c8d2ff; font-size: 11px;")
+        self.ws_a_combo = QtWidgets.QComboBox()
+        self.ws_a_combo.addItems(_available_workspaces)
+        _idx_a = self.ws_a_combo.findText(_current_cycle[0])
+        if _idx_a >= 0:
+            self.ws_a_combo.setCurrentIndex(_idx_a)
+
+        ws_arrow = QtWidgets.QLabel("⇄")
+        ws_arrow.setStyleSheet("color: #505878; font-size: 14px;")
+        ws_arrow.setAlignment(QtCore.Qt.AlignCenter)
+
+        ws_b_label = QtWidgets.QLabel("Workspace B:")
+        ws_b_label.setStyleSheet("color: #c8d2ff; font-size: 11px;")
+        self.ws_b_combo = QtWidgets.QComboBox()
+        self.ws_b_combo.addItems(_available_workspaces)
+        _idx_b = self.ws_b_combo.findText(_current_cycle[1])
+        if _idx_b >= 0:
+            self.ws_b_combo.setCurrentIndex(_idx_b)
+
+        ws_row.addWidget(ws_a_label)
+        ws_row.addWidget(self.ws_a_combo, 1)
+        ws_row.addWidget(ws_arrow)
+        ws_row.addWidget(ws_b_label)
+        ws_row.addWidget(self.ws_b_combo, 1)
+        layout.addLayout(ws_row)
+
+        # -------------------------------------------------
         # VISIBILITY TOGGLES ROW (1–5)
         # -------------------------------------------------
         vis_row_label = QtWidgets.QLabel("Hot Buttons Visibility")
@@ -478,6 +560,12 @@ class PhoenixPanelSettings(QtWidgets.QDialog):
         self.panel.grid_row_alignment       = self.grid_row_align_combo.currentIndex()
         self.panel.title_click_code   = self.title_click_edit.toPlainText()
         self.panel.title_click_type   = "python" if self.title_click_type_box.currentIndex() == 0 else "mel"
+
+        # Workspace cycle pair
+        ws_a = self.ws_a_combo.currentText().strip()
+        ws_b = self.ws_b_combo.currentText().strip()
+        if ws_a and ws_b:
+            self.panel.workspace_cycle = [ws_a, ws_b]
 
         # Quick buttons (name, tooltip, type, code, visible)
         # Also save global right-click actions

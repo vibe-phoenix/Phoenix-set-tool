@@ -164,6 +164,10 @@ class PhoenixPanel(QtWidgets.QDialog):
             for _ in range(5)
         ]
 
+        # Workspace pair cycled by right-clicking the ⚙ Settings button.
+        # Stored as [workspace_a, workspace_b] — toggling flips between them.
+        self.workspace_cycle = ["General", "UV Editing"]
+
         # Reposition mode (panel-owned drag state)
         self._reposition_mode  = False   # True while mode is active
         self._drag_src_index   = None    # index of button being dragged
@@ -321,15 +325,17 @@ class PhoenixPanel(QtWidgets.QDialog):
             cmds.warning("PhoenixPanel: toggle default material error: {}".format(e))
 
     def _toggle_workspace(self):
-        """Right-click Settings: toggle between General and UV Editing workspace."""
+        """Right-click Settings: cycle between the two workspaces configured in Settings."""
         try:
+            ws_a, ws_b = self.workspace_cycle[0], self.workspace_cycle[1]
             current = cmds.workspaceLayoutManager(q=True, current=True)
-            if current == "UV Editing":
-                cmds.workspaceLayoutManager(setCurrent="General")
-                cmds.inViewMessage(amg="<hl>General</hl> Workspace", pos="topCenter", fade=True)
-            else:
-                cmds.workspaceLayoutManager(setCurrent="UV Editing")
-                cmds.inViewMessage(amg="<hl>UV Editing</hl> Workspace", pos="topCenter", fade=True)
+            # If we're on ws_a switch to ws_b, otherwise switch to ws_a.
+            target = ws_b if current == ws_a else ws_a
+            cmds.workspaceLayoutManager(setCurrent=target)
+            cmds.inViewMessage(
+                amg="<hl>{}</hl> Workspace".format(target),
+                pos="topCenter", fade=True
+            )
         except Exception as e:
             cmds.warning("PhoenixPanel: toggle workspace error: {}".format(e))
 
@@ -465,7 +471,7 @@ class PhoenixPanel(QtWidgets.QDialog):
             }
             QPushButton:hover { background: #32384c; }
         """)
-        self.settings_btn.setToolTip("Left: Settings  |  Right-click: Toggle UV / General workspace")
+        self.settings_btn.setToolTip("Left: Settings  |  Right-click: Toggle workspace (configurable in Settings)")
         self.settings_btn.installEventFilter(self)
         title_row.addWidget(self.settings_btn)
 
@@ -639,6 +645,10 @@ class PhoenixPanel(QtWidgets.QDialog):
                         "type":    rc_list[i].get("type", "python"),
                         "enabled": bool(rc_list[i].get("enabled", False)),
                     }
+            # Load workspace cycle pair
+            wc = data.get("workspace_cycle")
+            if isinstance(wc, list) and len(wc) == 2 and all(isinstance(s, str) for s in wc):
+                self.workspace_cycle = wc
         except Exception:
             self.current_tab = 0
 
@@ -649,6 +659,7 @@ class PhoenixPanel(QtWidgets.QDialog):
                 json.dump({
                     "last_tab": self.current_tab,
                     "quick_button_rc": self.quick_button_rc,
+                    "workspace_cycle": self.workspace_cycle,
                 }, f, indent=2)
         except Exception:
             pass
