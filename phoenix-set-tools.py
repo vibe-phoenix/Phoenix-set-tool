@@ -935,7 +935,7 @@ def action_duplicate_right_click(*_):
 class ImportBlockoutDialog(QtWidgets.QDialog):
     def __init__(self, obj_paths, parent=maya_main_window()):
         super().__init__(parent)
-        self.setWindowTitle("Import Blockout — Choose OBJ")
+        self.setWindowTitle("Import Blockout — Choose OBJ / FBX")
         self.setObjectName("PhoenixImportBlockoutDialog")
         self.setWindowFlags(self.windowFlags() ^ QtCore.Qt.WindowContextHelpButtonHint)
         self.setMinimumSize(620, 520)
@@ -949,7 +949,7 @@ class ImportBlockoutDialog(QtWidgets.QDialog):
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("Search:"))
         self.search = QtWidgets.QLineEdit()
-        self.search.setPlaceholderText("Filter by obj/folder name...")
+        self.search.setPlaceholderText("Filter by file/folder name...")
         row.addWidget(self.search, 1)
         layout.addLayout(row)
 
@@ -990,7 +990,7 @@ class ImportBlockoutDialog(QtWidgets.QDialog):
 
     def _on_ok(self):
         if not self.listw.currentItem():
-            QtWidgets.QMessageBox.warning(self, "Select an OBJ", "Please select an OBJ to import.")
+            QtWidgets.QMessageBox.warning(self, "Select a File", "Please select an OBJ or FBX to import.")
             return
         self.accept()
 
@@ -1015,16 +1015,17 @@ def _derive_asset_root_from_scene(scene_path):
 
 
 def _find_blockout_objs(asset_root):
-    mod_dir = os.path.join(asset_root, "mod")
-    if not os.path.isdir(mod_dir):
-        return []
     found = []
-    for entry in os.listdir(mod_dir):
-        full = os.path.join(mod_dir, entry)
-        if os.path.isdir(full) and entry.lower().endswith("_blockout"):
-            for f in os.listdir(full):
-                if f.lower().endswith(".obj"):
-                    found.append(os.path.join(full, f))
+    for folder_name in ("mod", "obj"):
+        search_dir = os.path.join(asset_root, folder_name)
+        if not os.path.isdir(search_dir):
+            continue
+        for entry in os.listdir(search_dir):
+            full = os.path.join(search_dir, entry)
+            if os.path.isdir(full) and entry.lower().endswith("_blockout"):
+                for f in os.listdir(full):
+                    if f.lower().endswith(".obj") or f.lower().endswith(".fbx"):
+                        found.append(os.path.join(full, f))
     return found
 
 
@@ -1070,7 +1071,7 @@ def action_import_blockout(*_):
 
     obj_paths = _find_blockout_objs(asset_root)
     if not obj_paths:
-        cmds.warning(f"No blockout OBJ found under: {os.path.join(asset_root, 'mod')}\\*_blockout\\*.obj")
+        cmds.warning(f"No blockout OBJ/FBX found under: {asset_root}\\(mod|obj)\\*_blockout\\*.obj|*.fbx")
         return
 
     if len(obj_paths) == 1:
@@ -1083,13 +1084,17 @@ def action_import_blockout(*_):
         obj_path = dlg.selected_path()
 
     if not obj_path or not os.path.isfile(obj_path):
-        cmds.warning("Selected OBJ path is invalid.")
+        cmds.warning("Selected file path is invalid.")
         return
 
     obj_name = os.path.splitext(os.path.basename(obj_path))[0]
-    new_mesh_xforms = _import_obj(obj_path)
+    ext = os.path.splitext(obj_path)[1].lower()
+    if ext == ".fbx":
+        new_mesh_xforms = _import_fbx(obj_path)
+    else:
+        new_mesh_xforms = _import_obj(obj_path)
     if not new_mesh_xforms:
-        cmds.warning("Imported OBJ, but couldn't detect new mesh transforms to group.")
+        cmds.warning("Imported file, but couldn't detect new mesh transforms to group.")
         return
 
     grp = cmds.group(new_mesh_xforms, name=obj_name)
