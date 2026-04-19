@@ -519,7 +519,13 @@ class ExportSetupDialog(QtWidgets.QDialog):
         self.prefix_edit = QtWidgets.QLineEdit(get_default_project_name())
         self.prefix_edit.selectAll()
         prefix_row.addWidget(self.prefix_edit, 1)
+        self.no_prefix_cb = QtWidgets.QCheckBox("No prefix")
+        self.no_prefix_cb.setChecked(False)
+        self.no_prefix_cb.setToolTip("Export FBX named after the group only, with no prefix.")
+        prefix_row.addWidget(self.no_prefix_cb)
         layout.addLayout(prefix_row)
+
+        self.no_prefix_cb.toggled.connect(lambda v: self.prefix_edit.setEnabled(not v))
 
         opts_box = QtWidgets.QGroupBox("Export Options")
         opts_layout = QtWidgets.QVBoxLayout(opts_box)
@@ -615,13 +621,17 @@ class ExportSetupDialog(QtWidgets.QDialog):
                 item.setSelected(True)
 
     def _on_ok(self):
-        p = (self.prefix_edit.text() or "").strip()
-        if not p:
-            QtWidgets.QMessageBox.warning(self, "Prefix Required", "Please enter a prefix before exporting.")
-            return
+        if not self.no_prefix_cb.isChecked():
+            p = (self.prefix_edit.text() or "").strip()
+            if not p:
+                QtWidgets.QMessageBox.warning(self, "Prefix Required", "Please enter a prefix, or check 'No prefix'.")
+                return
         self.accept()
 
-    def prefix(self): return (self.prefix_edit.text() or "").strip()
+    def prefix(self):
+        if self.no_prefix_cb.isChecked():
+            return ""
+        return (self.prefix_edit.text() or "").strip()
     def is_blockout(self): return bool(self.blockout_cb.isChecked())
     def create_ma_files(self): return bool(self.create_ma_cb.isChecked())
     def use_underscore(self): return bool(self.underscore_cb.isChecked())
@@ -634,6 +644,8 @@ class ExportSetupDialog(QtWidgets.QDialog):
 def _build_export_folder_name(prefix, group_short, use_underscore):
     clean_prefix = strip_special_for_name(prefix)
     clean_group = group_short
+    if not clean_prefix:
+        return clean_group
     if use_underscore:
         return f"{clean_prefix}_{clean_group}"
     else:
@@ -692,6 +704,624 @@ def export_group_to_structure(base_folder, prefix, group_long, blockout=False,
                 f.write("//Maya ASCII 2024 scene\n//Placeholder\n")
 
     return fbx_path
+
+
+
+
+# ============================================================
+# SHIFT+CLICK EXPORT — Smooth, Centre, Cleanup, FBX, Revert
+# ============================================================
+
+def _get_asset_root_from_scene_path(scene_path):
+    """Walk up from the maya file to find the set-element root (parent of 'maya' folder)."""
+    if not scene_path:
+        return None
+    d = os.path.dirname(scene_path)
+    if os.path.basename(d).lower() == "maya":
+        return os.path.dirname(d)
+    return d
+
+
+def _current_element_root():
+    """
+    Derive the current set-element root folder from the open scene path.
+    Scene is expected to be at:  <element_root>/maya/<filename>.ma
+    Returns the element_root path, or None if it cannot be determined.
+    """
+    scene_path = cmds.file(q=True, sn=True)
+    if not scene_path:
+        return None
+    d = os.path.dirname(scene_path)
+    if os.path.basename(d).lower() == "maya":
+        return os.path.dirname(d)   # element_root
+    return None
+
+
+def _scene_set_element_roots():
+    """
+    Return every sibling set-element folder from the current scene's setElements parent.
+    Scene is expected at: <set_root>/setElements/<element>/maya/<file>.ma
+    So:  scene → maya/ → element/ → setElements/ → (all siblings)
+    """
+    scene_path = cmds.file(q=True, sn=True)
+    if not scene_path:
+        return []
+    maya_dir    = os.path.dirname(scene_path)           # .../element/maya
+    elem_dir    = os.path.dirname(maya_dir)             # .../element
+    se_dir      = os.path.dirname(elem_dir)             # .../setElements  (hopefully)
+
+    if os.path.basename(se_dir).lower() == "setelements" and os.path.isdir(se_dir):
+        return [
+            os.path.join(se_dir, n)
+            for n in sorted(os.listdir(se_dir))
+            if os.path.isdir(os.path.join(se_dir, n))
+        ]
+
+    # Fallback: look for a setElements sibling next to elem_dir
+    parent = os.path.dirname(elem_dir)
+    se_dir2 = os.path.join(parent, "setElements")
+    if os.path.isdir(se_dir2):
+        return [
+            os.path.join(se_dir2, n)
+            for n in sorted(os.listdir(se_dir2))
+            if os.path.isdir(os.path.join(se_dir2, n))
+        ]
+    return []
+
+
+def _mod_obj_folder_for_element(element_root):
+    """
+    Return the export folder inside a set element root.
+    Checks for 'mod' first, then 'obj' at the top of the element folder.
+    Creates 'mod' if neither exists.
+    Never looks inside mod/obj — the FBX goes directly in mod/ or obj/.
+    """
+    for sub in ("mod", "obj"):
+        p = os.path.join(element_root, sub)
+        if os.path.isdir(p):
+            return p
+    # Neither exists — create mod/
+    p = os.path.join(element_root, "mod")
+    os.makedirs(p, exist_ok=True)
+    return p
+
+
+def _get_bounding_box_world(nodes_long):
+    """Return combined world bounding box of a list of nodes."""
+    all_bb = [cmds.exactWorldBoundingBox(n) for n in nodes_long]
+    if not all_bb:
+        return None
+    minx = min(b[0] for b in all_bb)
+    miny = min(b[1] for b in all_bb)
+    minz = min(b[2] for b in all_bb)
+    maxx = max(b[3] for b in all_bb)
+    maxy = max(b[4] for b in all_bb)
+    maxz = max(b[5] for b in all_bb)
+    return minx, miny, minz, maxx, maxy, maxz
+
+
+def _centre_groups_to_origin_y0(groups_long):
+    """
+    Move each group so its bounding-box base sits at Y=0 and its XZ centre is at world origin.
+    Returns a dict {group_long: (tx, ty, tz)} of the translation deltas applied,
+    so we can revert afterwards.
+    """
+    deltas = {}
+    for g in groups_long:
+        bb = cmds.exactWorldBoundingBox(g)
+        minx, miny, minz, maxx, maxy, maxz = bb
+        cx = (minx + maxx) * 0.5
+        cz = (minz + maxz) * 0.5
+        dx = -cx
+        dy = -miny
+        dz = -cz
+        cmds.move(dx, dy, dz, g, r=True, ws=True)
+        deltas[g] = (dx, dy, dz)
+    return deltas
+
+
+def _smooth_meshes_in_groups(groups_long, divisions):
+    """
+    Apply cmds.polySmooth to every mesh inside the groups using OpenSubdiv Catmull-Clark.
+    Flags:
+      dv   — subdivision divisions
+      mth  — method: 2 = OpenSubdiv Catmull-Clark
+      ovb  — OpenSubdiv vertex boundary: 2 = preserve corners (edge+corner)
+      ofc  — OpenSubdiv face-varying boundary: 2 = preserve edges and corners
+      kb   — keep border edges (False)
+    Returns list of (mesh_long, node_name) for history deletion on revert.
+    """
+    smooth_nodes = []
+    for g in groups_long:
+        all_desc = cmds.listRelatives(g, allDescendents=True, fullPath=True, type="mesh") or []
+        for mesh in all_desc:
+            try:
+                result = cmds.polySmooth(
+                    mesh,
+                    dv=divisions,  # subdivision level
+                    mth=2,         # method: 2 = OpenSubdiv Catmull-Clark
+                    ovb=2,         # OpenSubdiv vertex boundary: 2 = edge only (preserves corners)
+                    ofc=2,         # OpenSubdiv face-varying linear: 2 = edges + corners preserved
+                    kb=False,      # keep border edges
+                )
+                if result:
+                    smooth_nodes.append((mesh, result[0]))
+            except Exception as e:
+                cmds.warning(f"[PhoenixExport] Smooth failed on {mesh}: {e}")
+    return smooth_nodes
+
+
+def _run_phoenix_cleanup_on_groups(groups_long):
+    """Run the Phoenix cleanup routine on the given groups."""
+    import maya.cmds as _cmds
+
+    def _process_node(node):
+        _cmds.xform(node, centerPivots=True)
+        _cmds.makeIdentity(node, apply=True, t=True, r=True, s=True, n=False, pn=True)
+        _cmds.delete(node, constructionHistory=True)
+
+    def _get_all_descendants(root):
+        descendants = _cmds.listRelatives(root, allDescendents=True, fullPath=True) or []
+        return [root] + descendants
+
+    def _is_group_node(node):
+        shapes = _cmds.listRelatives(node, shapes=True, fullPath=True) or []
+        return len(shapes) == 0
+
+    def _is_mesh_node(node):
+        shapes = _cmds.listRelatives(node, shapes=True, fullPath=True) or []
+        return any(_cmds.nodeType(s) == 'mesh' for s in shapes)
+
+    def _is_pos_ref(node):
+        short = node.split('|')[-1].lower()
+        return 'positionref' in short
+
+    all_nodes = []
+    seen = set()
+    for r in groups_long:
+        for node in _get_all_descendants(r):
+            if node not in seen:
+                seen.add(node)
+                all_nodes.append(node)
+
+    transforms = [n for n in all_nodes
+                  if _cmds.nodeType(n) == 'transform' and not _is_pos_ref(n)]
+    transforms.sort(key=lambda n: n.count('|'), reverse=True)
+
+    errors = []
+    for node in transforms:
+        try:
+            _process_node(node)
+        except Exception as e:
+            errors.append(node)
+            _cmds.warning(f"[PhoenixExport] Cleanup skipped {node}: {e}")
+
+
+def _export_groups_as_single_fbx(groups_long, fbx_path):
+    """Select all groups and export as one merged FBX."""
+    if not ensure_fbx_export_plugin():
+        raise RuntimeError("FBX plugin could not be loaded.")
+    cmds.select(groups_long, r=True)
+    fbx_path_mel = fbx_path.replace("\\", "/")
+    mel.eval("FBXResetExport;")
+    mel.eval(f'FBXExport -f "{fbx_path_mel}" -s;')
+
+
+# ── Step 1: mode picker ──────────────────────────────────────────────────────
+
+class ShiftExportModePicker(QtWidgets.QDialog):
+    """
+    First window shown on Shift+Click Export Groups.
+    Two big buttons: Current Session | All Set Elements.
+    """
+    # Returned by exec() via done()
+    MODE_SESSION  = 2
+    MODE_ALL      = 3
+
+    def __init__(self, parent=maya_main_window()):
+        super().__init__(parent)
+        self.setWindowTitle("Phoenix — Export FBX")
+        self.setObjectName("PhoenixShiftExportModePicker")
+        self.setWindowFlags(self.windowFlags() ^ QtCore.Qt.WindowContextHelpButtonHint)
+        self.setFixedSize(280, 110)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        lbl = QtWidgets.QLabel("Select export scope:")
+        lbl.setStyleSheet("font-weight: bold;")
+        layout.addWidget(lbl)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.setSpacing(10)
+
+        self.btn_session = QtWidgets.QPushButton("Current Session")
+        self.btn_all     = QtWidgets.QPushButton("All Set Elements")
+
+        for b in (self.btn_session, self.btn_all):
+            b.setMinimumHeight(40)
+            b.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+
+        self.btn_session.setToolTip(
+            "Export groups from the currently open Maya session."
+        )
+        self.btn_all.setToolTip(
+            "Iterate every set element folder found on disk and export each one."
+        )
+
+        btn_row.addWidget(self.btn_session)
+        btn_row.addWidget(self.btn_all)
+        layout.addLayout(btn_row)
+
+        self.btn_session.clicked.connect(lambda: self.done(self.MODE_SESSION))
+        self.btn_all.clicked.connect(lambda: self.done(self.MODE_ALL))
+
+
+# ── Step 2a: Current Session config dialog ───────────────────────────────────
+
+class ShiftExportSessionDialog(QtWidgets.QDialog):
+    """
+    Config dialog for Current Session mode.
+    Destination is always auto-derived from the current scene path:
+        <element_root>/mod/   or   <element_root>/obj/
+    No browse button — just groups, smooth, and FBX name.
+    """
+    def __init__(self, groups_long, element_root, dest_folder, parent=maya_main_window()):
+        super().__init__(parent)
+        self.setWindowTitle("Export FBX — Current Session")
+        self.setObjectName("PhoenixShiftExportSessionDialog")
+        self.setWindowFlags(self.windowFlags() ^ QtCore.Qt.WindowContextHelpButtonHint)
+        self.setMinimumSize(500, 480)
+
+        self._groups_long  = list(groups_long)
+        self._dest_folder  = dest_folder
+        self._element_root = element_root
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        # ── Destination info (read-only) ──────────────────────────
+        info_box = QtWidgets.QGroupBox("Export Destination  (auto)")
+        info_layout = QtWidgets.QVBoxLayout(info_box)
+        dest_lbl = QtWidgets.QLabel(dest_folder)
+        dest_lbl.setWordWrap(True)
+        dest_lbl.setStyleSheet("color: #aaa; font-size: 11px;")
+        dest_lbl.setToolTip(dest_folder)
+        info_layout.addWidget(dest_lbl)
+        layout.addWidget(info_box)
+
+        # ── Group list ────────────────────────────────────────────
+        layout.addWidget(QtWidgets.QLabel("Groups to export  (select one or more):"))
+        self.listw = QtWidgets.QListWidget()
+        self.listw.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.listw.setMinimumHeight(150)
+        for g in sorted(self._groups_long, key=lambda x: x.split("|")[-1].lower()):
+            short = g.split("|")[-1]
+            it = QtWidgets.QListWidgetItem(short)
+            it.setData(QtCore.Qt.UserRole, g)
+            it.setToolTip(g)
+            self.listw.addItem(it)
+        if self.listw.count():
+            self.listw.selectAll()
+        layout.addWidget(self.listw, 1)
+
+        # ── Smooth ────────────────────────────────────────────────
+        smooth_box = QtWidgets.QGroupBox("Smooth")
+        smooth_layout = QtWidgets.QHBoxLayout(smooth_box)
+        self.smooth_cb = QtWidgets.QCheckBox("Apply smooth divisions:")
+        self.smooth_cb.setChecked(True)
+        self.smooth_spin = QtWidgets.QSpinBox()
+        self.smooth_spin.setRange(0, 6)
+        self.smooth_spin.setValue(2)
+        self.smooth_spin.setMinimumWidth(55)
+        smooth_layout.addWidget(self.smooth_cb)
+        smooth_layout.addWidget(self.smooth_spin)
+        smooth_layout.addStretch(1)
+        layout.addWidget(smooth_box)
+        self.smooth_cb.toggled.connect(self.smooth_spin.setEnabled)
+
+        # ── FBX name ──────────────────────────────────────────────
+        name_row = QtWidgets.QHBoxLayout()
+        name_row.addWidget(QtWidgets.QLabel("FBX name:"))
+        self.name_edit = QtWidgets.QLineEdit(os.path.basename(element_root) if element_root else "")
+        self.name_edit.setPlaceholderText("filename (no extension)")
+        name_row.addWidget(self.name_edit, 1)
+        layout.addLayout(name_row)
+
+        # ── Buttons ───────────────────────────────────────────────
+        self.buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        )
+        self.buttons.button(QtWidgets.QDialogButtonBox.Ok).setText("Export FBX")
+        layout.addWidget(self.buttons)
+        self.buttons.accepted.connect(self._on_ok)
+        self.buttons.rejected.connect(self.reject)
+
+    def _on_ok(self):
+        if not self.listw.selectedItems():
+            QtWidgets.QMessageBox.warning(self, "No Groups", "Select at least one group.")
+            return
+        if not self.name_edit.text().strip():
+            QtWidgets.QMessageBox.warning(self, "No Name", "Enter a name for the FBX.")
+            return
+        self.accept()
+
+    def selected_groups(self):  return [it.data(QtCore.Qt.UserRole) for it in self.listw.selectedItems()]
+    def smooth_enabled(self):   return bool(self.smooth_cb.isChecked())
+    def smooth_divisions(self): return int(self.smooth_spin.value())
+    def mesh_name(self):        return self.name_edit.text().strip()
+    def destination(self):      return self._dest_folder
+
+
+# ── Step 2b: Per-element config dialog (All Set Elements mode) ───────────────
+
+# Sentinel return codes
+_ELEM_EXPORT = QtWidgets.QDialog.Accepted   # = 1
+_ELEM_SKIP   = 2
+_ELEM_CANCEL = QtWidgets.QDialog.Rejected   # = 0
+
+class ShiftExportElementDialog(QtWidgets.QDialog):
+    """
+    Shown once per set-element folder when running 'All Set Elements' mode.
+    Destination is always <element_root>/mod/ or <element_root>/obj/ — auto-resolved.
+    Buttons: Export FBX | Skip | Cancel All.
+    """
+    def __init__(self, element_root, groups_long, parent=maya_main_window()):
+        super().__init__(parent)
+        elem_name = os.path.basename(element_root)
+        self.setWindowTitle(f"Export FBX — {elem_name}")
+        self.setObjectName("PhoenixShiftExportElementDialog")
+        self.setWindowFlags(self.windowFlags() ^ QtCore.Qt.WindowContextHelpButtonHint)
+        self.setMinimumSize(480, 460)
+
+        self._element_root = element_root
+        self._dest_folder  = _mod_obj_folder_for_element(element_root)
+        self._groups_long  = list(groups_long)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        # Element header + auto dest
+        hdr = QtWidgets.QLabel(f"<b>Set Element:</b>  {elem_name}")
+        hdr.setToolTip(element_root)
+        layout.addWidget(hdr)
+
+        dest_lbl = QtWidgets.QLabel(self._dest_folder)
+        dest_lbl.setWordWrap(True)
+        dest_lbl.setStyleSheet("color: #aaa; font-size: 11px;")
+        dest_lbl.setToolTip(self._dest_folder)
+        layout.addWidget(dest_lbl)
+
+        sep = QtWidgets.QFrame()
+        sep.setFrameShape(QtWidgets.QFrame.HLine)
+        layout.addWidget(sep)
+
+        # ── Group list ────────────────────────────────────────────
+        layout.addWidget(QtWidgets.QLabel("Groups to export  (select one or more):"))
+        self.listw = QtWidgets.QListWidget()
+        self.listw.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.listw.setMinimumHeight(130)
+        for g in sorted(self._groups_long, key=lambda x: x.split("|")[-1].lower()):
+            short = g.split("|")[-1]
+            it = QtWidgets.QListWidgetItem(short)
+            it.setData(QtCore.Qt.UserRole, g)
+            it.setToolTip(g)
+            self.listw.addItem(it)
+        if self.listw.count():
+            self.listw.selectAll()
+        layout.addWidget(self.listw, 1)
+
+        # ── Smooth ────────────────────────────────────────────────
+        smooth_box = QtWidgets.QGroupBox("Smooth")
+        smooth_layout = QtWidgets.QHBoxLayout(smooth_box)
+        self.smooth_cb = QtWidgets.QCheckBox("Apply smooth divisions:")
+        self.smooth_cb.setChecked(True)
+        self.smooth_spin = QtWidgets.QSpinBox()
+        self.smooth_spin.setRange(0, 6)
+        self.smooth_spin.setValue(2)
+        self.smooth_spin.setMinimumWidth(55)
+        smooth_layout.addWidget(self.smooth_cb)
+        smooth_layout.addWidget(self.smooth_spin)
+        smooth_layout.addStretch(1)
+        layout.addWidget(smooth_box)
+        self.smooth_cb.toggled.connect(self.smooth_spin.setEnabled)
+
+        # ── FBX name ──────────────────────────────────────────────
+        name_row = QtWidgets.QHBoxLayout()
+        name_row.addWidget(QtWidgets.QLabel("FBX name:"))
+        self.name_edit = QtWidgets.QLineEdit(elem_name)
+        name_row.addWidget(self.name_edit, 1)
+        layout.addLayout(name_row)
+
+        # ── Buttons: Export | Skip | Cancel All ───────────────────
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.setSpacing(8)
+        self.btn_export = QtWidgets.QPushButton("Export FBX")
+        self.btn_skip   = QtWidgets.QPushButton("Skip")
+        self.btn_cancel = QtWidgets.QPushButton("Cancel All")
+        for b in (self.btn_export, self.btn_skip, self.btn_cancel):
+            b.setMinimumHeight(36)
+            b.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.btn_skip.setToolTip("Skip this element and continue to the next.")
+        self.btn_cancel.setToolTip("Abort the entire All Set Elements run.")
+        btn_row.addWidget(self.btn_export)
+        btn_row.addWidget(self.btn_skip)
+        btn_row.addWidget(self.btn_cancel)
+        layout.addLayout(btn_row)
+
+        self.btn_export.clicked.connect(self._on_export)
+        self.btn_skip.clicked.connect(lambda: self.done(_ELEM_SKIP))
+        self.btn_cancel.clicked.connect(self.reject)
+
+    def _on_export(self):
+        if not self.listw.selectedItems():
+            QtWidgets.QMessageBox.warning(self, "No Groups", "Select at least one group.")
+            return
+        if not self.name_edit.text().strip():
+            QtWidgets.QMessageBox.warning(self, "No Name", "Enter a name for the FBX.")
+            return
+        self.accept()
+
+    def selected_groups(self):  return [it.data(QtCore.Qt.UserRole) for it in self.listw.selectedItems()]
+    def smooth_enabled(self):   return bool(self.smooth_cb.isChecked())
+    def smooth_divisions(self): return int(self.smooth_spin.value())
+    def mesh_name(self):        return self.name_edit.text().strip()
+    def destination(self):      return self._dest_folder
+
+
+# ── Shared export execution ───────────────────────────────────────────────────
+
+def _execute_shift_export(chosen_groups, mesh_name, dest_folder, do_smooth, smooth_divs):
+    """
+    Core export routine used by both session and all-elements modes.
+    1. Centre groups to Y=0 world origin.
+    2. Smooth meshes (optional).
+    3. Phoenix cleanup (freeze + delete history).
+    4. Export as single FBX.
+    5. Undo the whole chunk — restores scene to pre-export state.
+    Returns the exported fbx path on success.
+    """
+    if not os.path.isdir(dest_folder):
+        os.makedirs(dest_folder, exist_ok=True)
+
+    fbx_path = os.path.join(dest_folder, safe_fs_name(mesh_name) + ".fbx")
+
+    cmds.undoInfo(openChunk=True, chunkName="PhoenixShiftExport")
+    try:
+        _centre_groups_to_origin_y0(chosen_groups)
+        if do_smooth and smooth_divs > 0:
+            _smooth_meshes_in_groups(chosen_groups, smooth_divs)
+        _run_phoenix_cleanup_on_groups(chosen_groups)
+        _export_groups_as_single_fbx(chosen_groups, fbx_path)
+    finally:
+        cmds.undoInfo(closeChunk=True)
+
+    cmds.undo()   # revert everything: positions, smooth, history
+    return fbx_path
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def action_shift_export_groups(*_):
+    """
+    Shift+Click on Export Groups.
+    Step 1 — show mode picker (Current Session | All Set Elements).
+    Step 2a — Current Session: pick groups + config → export → revert.
+    Step 2b — All Set Elements: iterate every element folder, show per-element
+               config dialog with Export / Skip / Cancel All.
+    """
+    # ── Step 1: mode picker ───────────────────────────────────────
+    picker = ShiftExportModePicker()
+    mode = picker.exec_() if hasattr(picker, "exec_") else picker.exec()
+
+    # ── Step 2a: Current Session ──────────────────────────────────
+    if mode == ShiftExportModePicker.MODE_SESSION:
+        transforms = cmds.ls(type="transform", long=True) or []
+        groups_long = [t for t in transforms if is_group_transform(t)]
+        if not groups_long:
+            cmds.inViewMessage(amg="No groups in scene to export.", pos="topCenter", fade=True)
+            return
+
+        # Derive destination from scene path
+        element_root = _current_element_root()
+        if not element_root:
+            QtWidgets.QMessageBox.warning(
+                maya_main_window(),
+                "Cannot Derive Path",
+                "The scene does not appear to be inside a set element's maya/ folder.\n"
+                "Expected: <element_root>/maya/<file>.ma"
+            )
+            return
+        dest_folder = _mod_obj_folder_for_element(element_root)
+
+        dlg = ShiftExportSessionDialog(groups_long, element_root, dest_folder)
+        result = dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()
+        if result != QtWidgets.QDialog.Accepted:
+            return
+
+        chosen = dlg.selected_groups()
+        if not chosen:
+            return
+
+        prev_sel = cmds.ls(sl=True, long=True) or []
+        try:
+            fbx_path = _execute_shift_export(
+                chosen, dlg.mesh_name(), dlg.destination(),
+                dlg.smooth_enabled(), dlg.smooth_divisions()
+            )
+            cmds.inViewMessage(
+                amg=f"Exported → {os.path.basename(fbx_path)}  (scene reverted)",
+                pos="topCenter", fade=True, fadeStayTime=3000
+            )
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(maya_main_window(), "Export Failed", str(e))
+        finally:
+            try:
+                cmds.select(prev_sel, r=True) if prev_sel else cmds.select(clear=True)
+            except Exception:
+                cmds.select(clear=True)
+
+    # ── Step 2b: All Set Elements ─────────────────────────────────
+    elif mode == ShiftExportModePicker.MODE_ALL:
+        element_roots = _scene_set_element_roots()
+        if not element_roots:
+            QtWidgets.QMessageBox.warning(
+                maya_main_window(),
+                "No Set Elements Found",
+                "Could not locate a 'setElements' folder relative to the current scene.\n"
+                "Please make sure the scene is saved inside a set element's maya/ folder."
+            )
+            return
+
+        # Gather current-scene groups (same groups for every element — they share the scene)
+        transforms = cmds.ls(type="transform", long=True) or []
+        groups_long = [t for t in transforms if is_group_transform(t)]
+        if not groups_long:
+            cmds.inViewMessage(amg="No groups in scene to export.", pos="topCenter", fade=True)
+            return
+
+        exported_count = 0
+        skipped_count  = 0
+
+        for elem_root in sorted(element_roots):
+            dlg = ShiftExportElementDialog(elem_root, groups_long)
+            result = dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()
+
+            if result == _ELEM_SKIP:
+                skipped_count += 1
+                continue
+            if result == QtWidgets.QDialog.Rejected:   # Cancel All
+                break
+
+            # Accepted — export
+            chosen = dlg.selected_groups()
+            if not chosen:
+                skipped_count += 1
+                continue
+
+            prev_sel = cmds.ls(sl=True, long=True) or []
+            try:
+                _execute_shift_export(
+                    chosen, dlg.mesh_name(), dlg.destination(),
+                    dlg.smooth_enabled(), dlg.smooth_divisions()
+                )
+                exported_count += 1
+            except Exception as e:
+                cmds.warning(f"[PhoenixExport] Failed for {os.path.basename(elem_root)}: {e}")
+            finally:
+                try:
+                    cmds.select(prev_sel, r=True) if prev_sel else cmds.select(clear=True)
+                except Exception:
+                    cmds.select(clear=True)
+
+        if exported_count or skipped_count:
+            cmds.inViewMessage(
+                amg=f"Export done — {exported_count} exported, {skipped_count} skipped  (scene reverted)",
+                pos="topCenter", fade=True, fadeStayTime=3500
+            )
 
 
 @undo_chunk
@@ -3329,6 +3959,7 @@ class PhoenixSetToolsUI(QtWidgets.QDialog):
         )
         self.btn_export.setToolTip(
             "Left-Click: Export groups as FBX (with structure)\n"
+            "Shift+Click: Select groups → centre Y=0, smooth, cleanup, export merged FBX to set element mod/obj, revert\n"
             "Right-Click: Export top-level groups as FBX into mod/final"
         )
         self.btn_dup.setToolTip(
@@ -3427,6 +4058,7 @@ class PhoenixSetToolsUI(QtWidgets.QDialog):
         self.btn_import.installEventFilter(self)
         self.btn_save.installEventFilter(self)
         self.btn_dup.installEventFilter(self)
+        self.btn_export.installEventFilter(self)
 
     def eventFilter(self, obj, event):
         if event.type() == QtCore.QEvent.MouseButtonPress:
@@ -3441,6 +4073,10 @@ class PhoenixSetToolsUI(QtWidgets.QDialog):
                 # Fall through to normal clicked signal for left without shift
             if obj == self.btn_dup and event.button() == QtCore.Qt.LeftButton:
                 action_duplicate_with_position_reference(); return True
+            if obj == self.btn_export and event.button() == QtCore.Qt.LeftButton:
+                if event.modifiers() & QtCore.Qt.ShiftModifier:
+                    action_shift_export_groups(); return True
+                # Fall through to normal clicked signal for plain left-click
         return super().eventFilter(obj, event)
 
 
