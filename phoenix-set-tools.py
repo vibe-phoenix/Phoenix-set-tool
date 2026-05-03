@@ -822,32 +822,68 @@ def _centre_groups_to_origin_y0(groups_long):
 
 def _smooth_meshes_in_groups(groups_long, divisions):
     """
-    Apply cmds.polySmooth to every mesh inside the groups using OpenSubdiv Catmull-Clark.
-    Flags:
-      dv   — subdivision divisions
-      mth  — method: 2 = OpenSubdiv Catmull-Clark
-      ovb  — OpenSubdiv vertex boundary: 2 = preserve corners (edge+corner)
-      ofc  — OpenSubdiv face-varying boundary: 2 = preserve edges and corners
-      kb   — keep border edges (False)
-    Returns list of (mesh_long, node_name) for history deletion on revert.
+    Apply polySmooth to every mesh shape inside the groups, matching Maya's own
+    MEL output when you select a group and run Mesh > Smooth:
+      - Target: mesh shape nodes (by short name), not transforms
+      - mth=0  : Maya Catmull-Clark (not OpenSubdiv — mth=2 fails silently)
+      - sdt=2  : subdivision type
+      - ovb=1, ofb=1 : boundary rules
+      - dv     : user-specified divisions
+      - kb=1, ksb=1  : keep border / keep selection border
+      - sl=1   : smoothness
+      - ps=0.1 : push strength (corner preservation)
+      - ro=1   : round sharp
+      - ch=1   : keep construction history (needed so undo works)
     """
     smooth_nodes = []
     for g in groups_long:
-        all_desc = cmds.listRelatives(g, allDescendents=True, fullPath=True, type="mesh") or []
-        for mesh in all_desc:
-            try:
-                result = cmds.polySmooth(
-                    mesh,
-                    dv=divisions,  # subdivision level
-                    mth=2,         # method: 2 = OpenSubdiv Catmull-Clark
-                    ovb=2,         # OpenSubdiv vertex boundary: 2 = edge only (preserves corners)
-                    ofc=2,         # OpenSubdiv face-varying linear: 2 = edges + corners preserved
-                    kb=False,      # keep border edges
-                )
-                if result:
-                    smooth_nodes.append((mesh, result[0]))
-            except Exception as e:
-                cmds.warning(f"[PhoenixExport] Smooth failed on {mesh}: {e}")
+        all_transforms = (
+            cmds.listRelatives(g, allDescendents=True, fullPath=True, type="transform") or []
+        )
+        all_transforms = [g] + all_transforms
+
+        for xform in all_transforms:
+            shapes = cmds.listRelatives(xform, shapes=True, fullPath=True, type="mesh") or []
+            shapes = [s for s in shapes if not cmds.getAttr(f"{s}.intermediateObject")]
+            if not shapes:
+                continue
+
+            for shape in shapes:
+                # polySmooth needs the short name of the shape, just like Maya's MEL output
+                shape_short = shape.split("|")[-1]
+                try:
+                    cmds.select(shape_short, r=True)
+                    result = cmds.polySmooth(
+                        shape_short,
+                        mth=0,          # Maya Catmull-Clark
+                        sdt=2,          # subdivision type
+                        ovb=1,          # OpenSubdiv vertex boundary
+                        ofb=1,          # OpenSubdiv face boundary
+                        ofc=0,          # face-varying
+                        ost=0,
+                        ocr=0,
+                        dv=divisions,   # subdivision level
+                        bnr=1,
+                        c=1,
+                        kb=1,           # keep border
+                        ksb=1,          # keep selection border
+                        khe=0,
+                        kt=1,
+                        kmb=1,
+                        suv=1,
+                        peh=0,
+                        sl=1,           # smoothness
+                        dpe=1,
+                        ps=0.1,         # push strength — corner preservation
+                        ro=1,           # round sharp
+                        ch=1,           # construction history (required for undo)
+                    )
+                    if result:
+                        smooth_nodes.extend(result)
+                except Exception as e:
+                    cmds.warning(f"[PhoenixExport] Smooth failed on {shape_short}: {e}")
+
+    cmds.select(clear=True)
     return smooth_nodes
 
 
